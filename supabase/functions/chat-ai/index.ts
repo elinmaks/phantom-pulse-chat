@@ -1,5 +1,6 @@
 import "https://deno.land/x/xhr@0.1.0/mod.ts";
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.39.3';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -11,13 +12,29 @@ interface Message {
   content: string;
 }
 
-interface KnowledgeBase {
-  characters: { [key: string]: any };
-  events: { [key: string]: any };
-  topics: { [key: string]: any };
+interface Character {
+  name: string;
+  mentions: number;
+  facts: string[];
 }
 
-const knowledgeBases: { [userId: string]: KnowledgeBase } = {};
+interface Event {
+  name: string;
+  mentions: number;
+  details: string[];
+}
+
+interface Topic {
+  name: string;
+  mentions: number;
+  info: string[];
+}
+
+interface KnowledgeBase {
+  characters: { [key: string]: Character };
+  events: { [key: string]: Event };
+  topics: { [key: string]: Topic };
+}
 
 serve(async (req) => {
   if (req.method === 'OPTIONS') {
@@ -27,20 +44,21 @@ serve(async (req) => {
   try {
     const { messages, userId } = await req.json();
     const LOVABLE_API_KEY = Deno.env.get('LOVABLE_API_KEY');
+    const SUPABASE_URL = Deno.env.get('SUPABASE_URL');
+    const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
     
     if (!LOVABLE_API_KEY) {
       throw new Error('LOVABLE_API_KEY is not configured');
     }
 
-    if (!knowledgeBases[userId]) {
-      knowledgeBases[userId] = {
-        characters: {},
-        events: {},
-        topics: {},
-      };
+    if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+      throw new Error('Supabase credentials not configured');
     }
 
-    const kb = knowledgeBases[userId];
+    const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+
+    // Load knowledge base from database
+    const kb = await loadKnowledgeBase(supabase, userId);
     const lastUserMessage = messages[messages.length - 1]?.content || '';
 
     if (lastUserMessage.startsWith('/summary')) {
@@ -98,7 +116,7 @@ ${JSON.stringify(kb, null, 2)}
     const data = await response.json();
     const aiResponse = data.choices[0]?.message?.content || 'Извините, не могу ответить.';
 
-    updateKnowledgeBase(kb, messages, aiResponse);
+    await updateKnowledgeBase(supabase, userId, kb, messages, aiResponse);
 
     const shouldShowKeyboard = aiResponse.includes('[SHOW_KEYBOARD]');
     const cleanResponse = aiResponse.replace('[SHOW_KEYBOARD]', '').trim();
@@ -116,30 +134,120 @@ ${JSON.stringify(kb, null, 2)}
   }
 });
 
-function updateKnowledgeBase(kb: KnowledgeBase, messages: Message[], aiResponse: string) {
+async function loadKnowledgeBase(supabase: any, userId: string): Promise<KnowledgeBase> {
+  const kb: KnowledgeBase = {
+    characters: {},
+    events: {},
+    topics: {},
+  };
+
+  // Load characters
+  const { data: characters } = await supabase
+    .from('characters')
+    .select('*')
+    .eq('user_id', userId);
+
+  if (characters) {
+    characters.forEach((char: any) => {
+      kb.characters[char.name] = {
+        name: char.name,
+        mentions: char.mentions,
+        facts: char.facts || [],
+      };
+    });
+  }
+
+  // Load events
+  const { data: events } = await supabase
+    .from('events')
+    .select('*')
+    .eq('user_id', userId);
+
+  if (events) {
+    events.forEach((evt: any) => {
+      kb.events[evt.name] = {
+        name: evt.name,
+        mentions: evt.mentions,
+        details: evt.details || [],
+      };
+    });
+  }
+
+  // Load topics
+  const { data: topics } = await supabase
+    .from('topics')
+    .select('*')
+    .eq('user_id', userId);
+
+  if (topics) {
+    topics.forEach((topic: any) => {
+      kb.topics[topic.name] = {
+        name: topic.name,
+        mentions: topic.mentions,
+        info: topic.info || [],
+      };
+    });
+  }
+
+  return kb;
+}
+
+async function updateKnowledgeBase(
+  supabase: any,
+  userId: string,
+  kb: KnowledgeBase,
+  messages: Message[],
+  aiResponse: string
+) {
   const lastUserMessage = messages[messages.length - 1]?.content || '';
   const text = lastUserMessage + ' ' + aiResponse;
 
   const namePattern = /([А-ЯЁ][а-яё]+(?:\s[А-ЯЁ][а-яё]+)?)/g;
   const names = text.match(namePattern) || [];
   
-  names.forEach((name) => {
+  for (const name of names) {
     if (name.length > 2 && !['Да', 'Нет', 'Возможно', 'Привет'].includes(name)) {
       if (!kb.characters[name]) {
-        kb.characters[name] = { mentions: 0, facts: [] };
+        kb.characters[name] = { name, mentions: 0, facts: [] };
       }
       kb.characters[name].mentions += 1;
+
+      // Upsert to database
+      await supabase
+        .from('characters')
+        .upsert({
+          user_id: userId,
+          name: name,
+          mentions: kb.characters[name].mentions,
+          facts: kb.characters[name].facts,
+        }, {
+          onConflict: 'user_id,name',
+        });
     }
-  });
+  }
 
   const eventPattern = /(встреча|событие|проект|работа|задача)/gi;
   const events = text.match(eventPattern) || [];
-  events.forEach((event) => {
-    if (!kb.events[event]) {
-      kb.events[event] = { mentions: 0, details: [] };
+  
+  for (const event of events) {
+    const eventLower = event.toLowerCase();
+    if (!kb.events[eventLower]) {
+      kb.events[eventLower] = { name: eventLower, mentions: 0, details: [] };
     }
-    kb.events[event].mentions += 1;
-  });
+    kb.events[eventLower].mentions += 1;
+
+    // Upsert to database
+    await supabase
+      .from('events')
+      .upsert({
+        user_id: userId,
+        name: eventLower,
+        mentions: kb.events[eventLower].mentions,
+        details: kb.events[eventLower].details,
+      }, {
+        onConflict: 'user_id,name',
+      });
+  }
 }
 
 function generateSummary(kb: KnowledgeBase, target: string): string {
