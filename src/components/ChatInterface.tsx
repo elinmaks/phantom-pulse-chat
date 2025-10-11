@@ -3,10 +3,21 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { ChatMessage } from './ChatMessage';
 import { CustomKeyboard } from './CustomKeyboard';
+import { CharacterSelector } from './CharacterSelector';
+import { CharacterGraph } from './CharacterGraph';
 import { useTelegram } from './TelegramProvider';
-import { Send, Loader2 } from 'lucide-react';
+import { Send, Loader2, Users, Network } from 'lucide-react';
 import { supabase } from '@/integrations/supabase/client';
 import { useToast } from '@/hooks/use-toast';
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+  SheetTrigger,
+} from '@/components/ui/sheet';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 
 interface Message {
   role: 'user' | 'assistant' | 'system';
@@ -19,6 +30,8 @@ export const ChatInterface = () => {
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [showKeyboard, setShowKeyboard] = useState(false);
+  const [activeCharacter, setActiveCharacter] = useState<string | null>(null);
+  const [isTyping, setIsTyping] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const { triggerHaptic, user } = useTelegram();
   const { toast } = useToast();
@@ -33,15 +46,30 @@ export const ChatInterface = () => {
 
   useEffect(() => {
     if (user) {
+      const greeting = activeCharacter
+        ? `Привет! Теперь я в роли ${activeCharacter}. Давай пообщаемся! 🎭`
+        : `Привет, ${user.first_name}! Я AI-ассистент с памятью. Создавай персонажей и чат с ними! 💬`;
+      
       setMessages([
         {
           role: 'system',
-          content: `Привет, ${user.first_name}! Я AI-ассистент с памятью. Расскажи мне о своих друзьях, проектах или событиях, и я буду помнить всё о них.`,
+          content: greeting,
           timestamp: new Date(),
         },
       ]);
     }
-  }, [user]);
+  }, [user, activeCharacter]);
+
+  const handleCharacterSelect = (characterName: string | null) => {
+    setActiveCharacter(characterName);
+    triggerHaptic('medium');
+    toast({
+      title: characterName ? `🎭 Режим: ${characterName}` : '💬 Обычный режим',
+      description: characterName
+        ? 'Теперь вы общаетесь с персонажем'
+        : 'Вернулись к обычному чату',
+    });
+  };
 
   const sendMessage = async (text: string) => {
     if (!text.trim() || isLoading) return;
@@ -56,6 +84,7 @@ export const ChatInterface = () => {
     setMessages((prev) => [...prev, userMessage]);
     setInput('');
     setIsLoading(true);
+    setIsTyping(true);
     setShowKeyboard(false);
 
     try {
@@ -66,6 +95,7 @@ export const ChatInterface = () => {
             content: m.content,
           })),
           userId: user?.id,
+          activeCharacter,
         },
       });
 
@@ -93,6 +123,7 @@ export const ChatInterface = () => {
       });
     } finally {
       setIsLoading(false);
+      setIsTyping(false);
     }
   };
 
@@ -112,14 +143,68 @@ export const ChatInterface = () => {
 
   return (
     <div className="flex flex-col h-screen relative z-10">
+      <div className="border-b border-border bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 sticky top-0 z-20">
+        <div className="flex items-center justify-between p-4">
+          <div className="flex-1">
+            {activeCharacter ? (
+              <div>
+                <div className="text-sm font-semibold">🎭 Режим чата</div>
+                <div className="text-xs text-muted-foreground">{activeCharacter}</div>
+              </div>
+            ) : (
+              <div className="text-sm font-semibold">💬 AI Ассистент</div>
+            )}
+          </div>
+          <div className="flex gap-2">
+            <Sheet>
+              <SheetTrigger asChild>
+                <Button variant="outline" size="icon">
+                  <Users className="w-4 h-4" />
+                </Button>
+              </SheetTrigger>
+              <SheetContent side="right" className="w-[400px] sm:w-[540px]">
+                <SheetHeader>
+                  <SheetTitle>Персонажи и Связи</SheetTitle>
+                  <SheetDescription>
+                    Управляйте персонажами и анализируйте их связи
+                  </SheetDescription>
+                </SheetHeader>
+                <Tabs defaultValue="characters" className="mt-6">
+                  <TabsList className="grid w-full grid-cols-2">
+                    <TabsTrigger value="characters">Персонажи</TabsTrigger>
+                    <TabsTrigger value="graph">Граф</TabsTrigger>
+                  </TabsList>
+                  <TabsContent value="characters" className="mt-4">
+                    {user && (
+                      <CharacterSelector
+                        userId={user.id.toString()}
+                        onSelect={handleCharacterSelect}
+                        activeCharacter={activeCharacter}
+                      />
+                    )}
+                  </TabsContent>
+                  <TabsContent value="graph" className="mt-4">
+                    {user && <CharacterGraph userId={user.id.toString()} />}
+                  </TabsContent>
+                </Tabs>
+              </SheetContent>
+            </Sheet>
+          </div>
+        </div>
+      </div>
+
       <div className="flex-1 overflow-y-auto px-4 py-6 space-y-4">
         {messages.map((message, index) => (
           <ChatMessage key={index} {...message} />
         ))}
-        {isLoading && (
+        {isTyping && (
           <div className="flex justify-start">
             <div className="bg-card border border-border rounded-lg px-4 py-3">
-              <Loader2 className="w-5 h-5 animate-spin" />
+              <div className="flex gap-1">
+                <div className="w-2 h-2 bg-primary rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                <div className="w-2 h-2 bg-primary rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                <div className="w-2 h-2 bg-primary rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+              </div>
             </div>
           </div>
         )}

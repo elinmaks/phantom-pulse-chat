@@ -30,10 +30,20 @@ interface Topic {
   info: string[];
 }
 
+interface Relationship {
+  id: string;
+  from_character: string;
+  to_character: string;
+  type: string;
+  description: string;
+  strength: number;
+}
+
 interface KnowledgeBase {
   characters: { [key: string]: Character };
   events: { [key: string]: Event };
   topics: { [key: string]: Topic };
+  relationships: Relationship[];
 }
 
 serve(async (req) => {
@@ -42,7 +52,7 @@ serve(async (req) => {
   }
 
   try {
-    const { messages, userId } = await req.json();
+    const { messages, userId, activeCharacter } = await req.json();
     const LOVABLE_API_KEY = Deno.env.get('LOVABLE_API_KEY');
     const SUPABASE_URL = Deno.env.get('SUPABASE_URL');
     const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
@@ -79,7 +89,43 @@ serve(async (req) => {
       );
     }
 
-    const systemPrompt = `Ты — AI-ассистент с долговременной памятью. Твоя задача:
+    if (lastUserMessage.startsWith('/create')) {
+      const params = lastUserMessage.slice(8).trim();
+      const result = await createCharacter(supabase, userId, params);
+      return new Response(
+        JSON.stringify({ response: result, shouldShowKeyboard: false }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    if (lastUserMessage.startsWith('/link')) {
+      const params = lastUserMessage.slice(6).trim();
+      const result = await createLink(supabase, userId, params, kb);
+      return new Response(
+        JSON.stringify({ response: result, shouldShowKeyboard: false }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    if (lastUserMessage.startsWith('/analyze')) {
+      const result = analyzeGraph(kb);
+      return new Response(
+        JSON.stringify({ response: result, shouldShowKeyboard: false }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    if (lastUserMessage.startsWith('/export')) {
+      const exportData = JSON.stringify(kb, null, 2);
+      return new Response(
+        JSON.stringify({ response: `📦 Экспорт данных:\n\`\`\`json\n${exportData}\n\`\`\``, shouldShowKeyboard: false }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    let systemPrompt = activeCharacter 
+      ? await generateCharacterPrompt(supabase, userId, activeCharacter, kb)
+      : `Ты — AI-ассистент с долговременной памятью. Твоя задача:
 
 1. Анализируй разговор и выявляй:
    - Персонажей (людей, которых упоминает пользователь)
@@ -105,6 +151,10 @@ serve(async (req) => {
 ${formatKnowledgeBase(kb)}
 
 Используй эти знания активно в разговоре. Вспоминай детали о людях и событиях, которые упоминал пользователь.`;
+    
+    if (!activeCharacter) {
+      systemPrompt += '\n\n💡 Доступные команды:\n/create <имя> <описание> - создать персонажа\n/link <от> > <к> <тип> - создать связь\n/analyze - анализ графа связей\n/export - экспорт данных';
+    }
 
     // First call: Get AI response and extract knowledge
     const extractResponse = await fetch('https://ai.gateway.lovable.dev/v1/chat/completions', {
@@ -239,6 +289,7 @@ async function loadKnowledgeBase(supabase: any, userId: string): Promise<Knowled
     characters: {},
     events: {},
     topics: {},
+    relationships: [],
   };
 
   // Load characters
@@ -287,6 +338,30 @@ async function loadKnowledgeBase(supabase: any, userId: string): Promise<Knowled
         info: topic.info || [],
       };
     });
+  }
+
+  // Load relationships
+  const { data: relationships } = await supabase
+    .from('relationships')
+    .select(`
+      id,
+      relationship_type,
+      description,
+      strength,
+      from:characters!relationships_from_character_id_fkey(name),
+      to:characters!relationships_to_character_id_fkey(name)
+    `)
+    .eq('user_id', userId);
+
+  if (relationships) {
+    kb.relationships = relationships.map((rel: any) => ({
+      id: rel.id,
+      from_character: rel.from?.name || '',
+      to_character: rel.to?.name || '',
+      type: rel.relationship_type,
+      description: rel.description || '',
+      strength: rel.strength || 5,
+    }));
   }
 
   return kb;
@@ -471,4 +546,169 @@ function generateFacts(kb: KnowledgeBase, target: string): string {
   }
 
   return `Информации о "${target}" не найдено.`;
+}
+
+async function createCharacter(supabase: any, userId: string, params: string): Promise<string> {
+  const parts = params.split('|').map(p => p.trim());
+  if (parts.length < 2) {
+    return '❌ Формат: /create <имя> | <описание> | [категория] | [стиль речи]';
+  }
+
+  const [name, description, category = 'general', speakingStyle = ''] = parts;
+  
+  const { error } = await supabase
+    .from('characters')
+    .insert({
+      user_id: userId,
+      name,
+      facts: [description],
+      category,
+      personality: description,
+      speaking_style: speakingStyle,
+      mentions: 0,
+    });
+
+  if (error) {
+    console.error('Error creating character:', error);
+    return `❌ Ошибка создания персонажа: ${error.message}`;
+  }
+
+  return `✅ Персонаж "${name}" создан!\nОписание: ${description}\nКатегория: ${category}`;
+}
+
+async function createLink(supabase: any, userId: string, params: string, kb: KnowledgeBase): Promise<string> {
+  const match = params.match(/(.+?)\s*>\s*(.+?)\s+(.+)/);
+  if (!match) {
+    return '❌ Формат: /link <от> > <к> <тип связи> [описание]';
+  }
+
+  const [, fromName, toName, rest] = match;
+  const [relationType, ...descParts] = rest.trim().split(' ');
+  const description = descParts.join(' ');
+
+  // Find character IDs
+  const { data: fromChar } = await supabase
+    .from('characters')
+    .select('id')
+    .eq('user_id', userId)
+    .eq('name', fromName.trim())
+    .single();
+
+  const { data: toChar } = await supabase
+    .from('characters')
+    .select('id')
+    .eq('user_id', userId)
+    .eq('name', toName.trim())
+    .single();
+
+  if (!fromChar || !toChar) {
+    return `❌ Один из персонажей не найден. Сначала создайте их командой /create`;
+  }
+
+  const { error } = await supabase
+    .from('relationships')
+    .insert({
+      user_id: userId,
+      from_character_id: fromChar.id,
+      to_character_id: toChar.id,
+      relationship_type: relationType,
+      description: description || '',
+      strength: 5,
+    });
+
+  if (error) {
+    console.error('Error creating relationship:', error);
+    return `❌ Ошибка создания связи: ${error.message}`;
+  }
+
+  return `✅ Связь создана: ${fromName} > ${toName} (${relationType})`;
+}
+
+function analyzeGraph(kb: KnowledgeBase): string {
+  const charCount = Object.keys(kb.characters).length;
+  const relCount = kb.relationships.length;
+
+  if (charCount === 0) {
+    return '❌ База знаний пуста. Создайте персонажей командой /create';
+  }
+
+  let result = `📊 Анализ графа связей\n\n`;
+  result += `👥 Персонажей: ${charCount}\n`;
+  result += `🔗 Связей: ${relCount}\n\n`;
+
+  // Find most connected characters
+  const connections: { [key: string]: number } = {};
+  kb.relationships.forEach(rel => {
+    connections[rel.from_character] = (connections[rel.from_character] || 0) + 1;
+    connections[rel.to_character] = (connections[rel.to_character] || 0) + 1;
+  });
+
+  const sorted = Object.entries(connections).sort((a, b) => b[1] - a[1]);
+  
+  if (sorted.length > 0) {
+    result += `🌟 Самые связанные:\n`;
+    sorted.slice(0, 3).forEach(([name, count]) => {
+      result += `- ${name}: ${count} связей\n`;
+    });
+  }
+
+  result += `\n📋 Типы связей:\n`;
+  const relTypes: { [key: string]: number } = {};
+  kb.relationships.forEach(rel => {
+    relTypes[rel.type] = (relTypes[rel.type] || 0) + 1;
+  });
+  
+  Object.entries(relTypes).forEach(([type, count]) => {
+    result += `- ${type}: ${count}\n`;
+  });
+
+  return result;
+}
+
+async function generateCharacterPrompt(
+  supabase: any,
+  userId: string,
+  characterName: string,
+  kb: KnowledgeBase
+): Promise<string> {
+  const { data: character } = await supabase
+    .from('characters')
+    .select('*')
+    .eq('user_id', userId)
+    .eq('name', characterName)
+    .single();
+
+  if (!character) {
+    return `Персонаж "${characterName}" не найден.`;
+  }
+
+  const relationships = kb.relationships.filter(
+    rel => rel.from_character === characterName || rel.to_character === characterName
+  );
+
+  let prompt = `Ты играешь роль персонажа: ${character.name}\n\n`;
+  prompt += `🎭 Личность: ${character.personality || 'Не указана'}\n`;
+  
+  if (character.speaking_style) {
+    prompt += `🗣️ Стиль речи: ${character.speaking_style}\n`;
+  }
+
+  if (character.facts && character.facts.length > 0) {
+    prompt += `\n📝 Факты о тебе:\n${character.facts.map((f: string) => `- ${f}`).join('\n')}\n`;
+  }
+
+  if (relationships.length > 0) {
+    prompt += `\n🔗 Твои связи:\n`;
+    relationships.forEach(rel => {
+      if (rel.from_character === characterName) {
+        prompt += `- ${rel.to_character}: ${rel.type} (${rel.description})\n`;
+      } else {
+        prompt += `- ${rel.from_character}: ${rel.type} (${rel.description})\n`;
+      }
+    });
+  }
+
+  prompt += `\n💬 Общайся от первого лица, оставайся в образе персонажа и используй его стиль речи.`;
+
+  return prompt;
 }

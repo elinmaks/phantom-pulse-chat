@@ -21,6 +21,8 @@ export type Database = {
           id: string
           mentions: number | null
           name: string
+          personality: string | null
+          speaking_style: string | null
           updated_at: string | null
           user_id: string
         }
@@ -30,6 +32,8 @@ export type Database = {
           id?: string
           mentions?: number | null
           name: string
+          personality?: string | null
+          speaking_style?: string | null
           updated_at?: string | null
           user_id: string
         }
@@ -39,6 +43,8 @@ export type Database = {
           id?: string
           mentions?: number | null
           name?: string
+          personality?: string | null
+          speaking_style?: string | null
           updated_at?: string | null
           user_id?: string
         }
@@ -73,6 +79,57 @@ export type Database = {
           user_id?: string
         }
         Relationships: []
+      }
+      relationships: {
+        Row: {
+          created_at: string | null
+          description: string | null
+          from_character_id: string
+          id: string
+          relationship_type: string
+          strength: number | null
+          to_character_id: string
+          updated_at: string | null
+          user_id: string
+        }
+        Insert: {
+          created_at?: string | null
+          description?: string | null
+          from_character_id: string
+          id?: string
+          relationship_type: string
+          strength?: number | null
+          to_character_id: string
+          updated_at?: string | null
+          user_id: string
+        }
+        Update: {
+          created_at?: string | null
+          description?: string | null
+          from_character_id?: string
+          id?: string
+          relationship_type?: string
+          strength?: number | null
+          to_character_id?: string
+          updated_at?: string | null
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "fk_from_character"
+            columns: ["from_character_id"]
+            isOneToOne: false
+            referencedRelation: "characters"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "fk_to_character"
+            columns: ["to_character_id"]
+            isOneToOne: false
+            referencedRelation: "characters"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       topics: {
         Row: {
